@@ -258,11 +258,17 @@ void PumiTallyImpl::InitPUMILibrary(int &argc, char **&argv) {
 
 void UpdateCurrentElement(PPPS *ptcls,
                           const Omega_h::Write<Omega_h::LO> &elem_ids,
-                          const Omega_h::Write<Omega_h::LO> &next_elems) {
+                          const Omega_h::Write<Omega_h::LO> &next_elems,
+                          const Omega_h::Write<Omega_h::LO> &last_exit) {
   const auto in_flight = ptcls->get<3>();
   auto move_to_next = PS_LAMBDA(const int e, const int pid, const int mask) {
-    // move only if particle in flight and not leaving the domain
-    if (mask > 0 && in_flight(pid) && next_elems[pid] != -1) {
+    // move to the next element only if the particle actually crossed a face in
+    // this iteration (last_exit != -1) and is not leaving the domain. For
+    // particles that reached their destination or were deleted (last_exit ==
+    // -1) next_elems is stale; copying it would corrupt the element pumipic
+    // found for them (e.g. by relocation) or resurrect a deleted particle.
+    if (mask > 0 && in_flight(pid) && next_elems[pid] != -1 &&
+        last_exit[pid] != -1) {
       elem_ids[pid] = next_elems[pid];
     }
   };
@@ -330,7 +336,7 @@ void ParticleAtElemBoundary::operator()(
   }
   ApplyVacuumBC(mesh, ptcls, elem_ids, next_elems, ptcl_done, last_exit,
                 inter_faces, inter_points);
-  UpdateCurrentElement(ptcls, elem_ids, next_elems);
+  UpdateCurrentElement(ptcls, elem_ids, next_elems, last_exit);
 }
 
 void ParticleAtElemBoundary::MarkAsInitial(const bool is_initial) {
