@@ -164,12 +164,6 @@ void PumiTallyImpl::AccumulateBatchTally(const double normalization_factor) {
 namespace {
 using ParticleAdapt = Omega_h::ParticleAdapt<3, PPPS, 0, ADAPT_PARENT, ADAPT_CHILD, ADAPT_DIM>;
 
-void addTallyTags(Omega_h::Mesh &mesh, const ParticleAtElemBoundary &tallies) {
-  mesh.add_tag(Omega_h::REGION, "pumitally_flux", 1, Omega_h::Reals(tallies.flux));
-  mesh.add_tag(Omega_h::REGION, "pumitally_flux_sum", 1, Omega_h::Reals(tallies.flux_sum));
-  mesh.add_tag(Omega_h::REGION, "pumitally_flux_sum_sq", 1, Omega_h::Reals(tallies.flux_sum_sq));
-}
-
 void populateParticleAdaptationFields(ParticleAdapt &p_adapt, PPPS *ptcls,
                                       const Omega_h::Int mesh_dim) {
   const auto particle_position = ptcls->get<0>();
@@ -229,44 +223,12 @@ std::unique_ptr<PPPS> rebuildParticlesAfterAdaptation(
   return adapted_particles;
 }
 
-Omega_h::Write<Omega_h::Real> takeAdaptedTally(Omega_h::Mesh &mesh,
-                                                const char *tag_name,
-                                                const char *array_name) {
-  const auto values = mesh.get_array<Omega_h::Real>(Omega_h::REGION, tag_name);
-  Omega_h::Write<Omega_h::Real> result(values.size(), 0.0, array_name);
-  Omega_h::parallel_for(values.size(), OMEGA_H_LAMBDA(const Omega_h::LO elem) {
-    result[elem] = values[elem];
-  });
-  mesh.remove_tag(Omega_h::REGION, tag_name);
-  return result;
-}
 
-void restoreAdaptedTallies(Omega_h::Mesh &mesh,
-                           ParticleAtElemBoundary &tallies) {
-  tallies.flux = takeAdaptedTally(mesh, "pumitally_flux", "flux");
-  tallies.flux_sum = takeAdaptedTally(mesh, "pumitally_flux_sum", "flux_sum");
-  tallies.flux_sum_sq = takeAdaptedTally(mesh, "pumitally_flux_sum_sq", "flux_sum_sq");
-}
-
-void refreshTracerForAdaptedMesh(PumiTallyImpl &tally, Omega_h::Mesh &mesh) {
-  tally.full_mesh = mesh;
-  tally.p_particle_tracer.reset();
-  const Omega_h::Write<Omega_h::LO> owners(tally.full_mesh.nelems(), 0, "owners");
-  tally.p_picparts = std::make_unique<pumipic::Mesh>(tally.full_mesh, Omega_h::LOs(owners));
-  tally.p_particle_tracer = std::make_unique<
-      ParticleTracer<PPParticle, pumitally::ParticleAtElemBoundary>>(
-      *tally.p_picparts, tally.pumipic_ptcls.get(),
-      *tally.p_pumi_particle_at_elem_boundary_handler, tally.pumipic_tol);
-  tally.p_pumi_particle_at_elem_boundary_handler->UpdatePreviousXPoints(tally.pumipic_ptcls.get());
-
-  Omega_h::vtk::write_vtu("box_after_adapt_flux.vtu", tally.p_picparts->mesh());
-}
 } // namespace
 
 void PumiTallyImpl::adaptMesh() {
   auto &mesh = *p_picparts->mesh();
   auto &tallies = *p_pumi_particle_at_elem_boundary_handler;
-  addTallyTags(mesh, tallies);
   Omega_h::vtk::write_vtu("box_before_adapt.vtu", &mesh);
 
   auto *ptcls = pumipic_ptcls.get();
@@ -280,9 +242,6 @@ void PumiTallyImpl::adaptMesh() {
   pumipic_ptcls = std::move(adapted_particles);
 
   Omega_h::vtk::write_vtu("box_after_adapt.vtu", &mesh);
-
-  restoreAdaptedTallies(mesh, tallies);
-  refreshTracerForAdaptedMesh(*this, mesh);
 }
 
 void PumiTallyImpl::DiscardBatchTally() const {
