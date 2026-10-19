@@ -34,14 +34,20 @@ struct TallyTimes {
  * @n   1-destination,
  * @n   2-ID,
  * @n   3-in_advance_particle_queue,
- * @n   4-weight
+ * @n   4-weight,
+ * @n   5-parent element, 6-child entity, and 7-classification dimension
+ *       for mesh adaptation
  */
 using PPParticle =
     pumipic::MemberTypes<pumipic::Vector3d, pumipic::Vector3d, Omega_h::LO,
-                         Omega_h::I16, Omega_h::Real>;
+                         Omega_h::I16, Omega_h::Real, Omega_h::LO,
+                         Omega_h::Int, Omega_h::Int>;
 using PPPS = pumipic::ParticleStructure<PPParticle>; //!< PUMI-PiC Particle DS
 using PPExeSpace =
     Kokkos::DefaultExecutionSpace; //!< PUMI-PiC Default Execution Space
+constexpr int ADAPT_PARENT = 5;
+constexpr int ADAPT_CHILD = 6;
+constexpr int ADAPT_DIM = 7;
 
 struct ParticleAtElemBoundary {
   /**
@@ -255,11 +261,13 @@ struct PumiTallyImpl {
                           double *particle_destinations, int8_t *flying,
                           double *weights, Omega_h::LO size);
 
-  void AccumulateBatchTally(double normalization_factor) const;
+  void AccumulateBatchTally(double normalization_factor);
 
   void DiscardBatchTally() const;
 
   void WriteTallyResults();
+
+  void adaptMesh();
 
   void CopyLocationsToBuffer(double *particle_positions) const;
 

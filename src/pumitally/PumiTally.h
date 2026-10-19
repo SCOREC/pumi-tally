@@ -113,6 +113,7 @@ public:
    *
    * @note Call it once per batch that should contribute to the result, after
    * all the particles of that batch are done moving.
+   * The mesh is adapted after the batch is accumulated.
    *
    * @see DiscardBatchTally
    */
