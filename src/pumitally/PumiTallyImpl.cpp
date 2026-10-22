@@ -195,10 +195,9 @@ std::unique_ptr<PPPS> rebuildParticlesAfterAdaptation(
     Omega_h::Mesh &mesh, ParticleAdapt &p_adapt, PPPS *ptcls) {
   const auto n_elements = mesh.nelems();
   const auto n_particles = ptcls->nPtcls();
-  PPPS::kkLidView particles_per_element("adapted_particles_per_element", n_elements);
-  PPPS::kkGidView element_gids("adapted_element_gids", n_elements);
-  PPPS::kkLidView new_elements("adapted_particle_elements", ptcls->capacity());
-  const auto particle_parent = p_adapt.pParent;
+  PPPS::kkLidView particles_per_element("particles_per_element", n_elements);
+  PPPS::kkGidView element_gids("element_gids", n_elements);
+  PPPS::kkLidView new_elements("particle_elements", ptcls->capacity());
 
   Omega_h::parallel_for(n_elements, OMEGA_H_LAMBDA(const Omega_h::LO elem) {
     particles_per_element(elem) = 0;
@@ -207,12 +206,11 @@ std::unique_ptr<PPPS> rebuildParticlesAfterAdaptation(
 
   const auto count_particles = PS_LAMBDA(const int &, const int &pid, const int &mask) {
     if (mask > 0) {
-      const auto parent = particle_parent(pid);
+      const auto parent = p_adapt.pParent(pid);
       new_elements(pid) = parent;
       Kokkos::atomic_add(&particles_per_element(parent), 1);
-    } else {
-      new_elements(pid) = -1;
-    }
+    } 
+    else new_elements(pid) = -1;
   };
   pumipic::parallel_for(ptcls, count_particles, "count adapted particles by element");
 
@@ -228,19 +226,13 @@ std::unique_ptr<PPPS> rebuildParticlesAfterAdaptation(
 
 void PumiTallyImpl::adaptMesh() {
   auto &mesh = *p_picparts->mesh();
-  auto &tallies = *p_pumi_particle_at_elem_boundary_handler;
   Omega_h::vtk::write_vtu("box_before_adapt.vtu", &mesh);
-
   auto *ptcls = pumipic_ptcls.get();
-  std::unique_ptr<PPPS> adapted_particles;
-  {
-    ParticleAdapt p_adapt(ptcls, mesh);
-    populateParticleAdaptationFields(p_adapt, ptcls, mesh.dim());
-    adaptMeshToMetric(mesh, p_adapt);
-    adapted_particles = rebuildParticlesAfterAdaptation(mesh, p_adapt, ptcls);
-  }
+  ParticleAdapt p_adapt(ptcls, mesh);
+  populateParticleAdaptationFields(p_adapt, ptcls, mesh.dim());
+  adaptMeshToMetric(mesh, p_adapt);
+  std::unique_ptr<PPPS> adapted_particles = rebuildParticlesAfterAdaptation(mesh, p_adapt, ptcls);
   pumipic_ptcls = std::move(adapted_particles);
-
   Omega_h::vtk::write_vtu("box_after_adapt.vtu", &mesh);
 }
 
