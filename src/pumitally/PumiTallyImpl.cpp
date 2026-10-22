@@ -179,11 +179,27 @@ void populateParticleAdaptationFields(ParticleAdapt &p_adapt, PPPS *ptcls,
   p_adapt.populateFields();
 }
 
-void adaptMeshToMetric(Omega_h::Mesh &mesh, ParticleAdapt &p_adapt) {
+void adaptMeshToMetric(Omega_h::Mesh &mesh, ParticleAdapt &p_adapt,
+                       const Omega_h::Reals &tally_mean,
+                       const Omega_h::Reals &tally_std_dev) {
+  auto vert2elem = mesh.ask_up(Omega_h::VERT, Omega_h::REGION);
   auto metrics = Omega_h::get_implied_isos(&mesh);
-  const auto metric_scale = Omega_h::metric_eigenvalue_from_length(0.9);
-  metrics = Omega_h::multiply_each_by(metrics, metric_scale);
-  mesh.add_tag(Omega_h::VERT, "metric", 1, metrics);
+  Omega_h::Write<Omega_h::Real> scaled_metrics(mesh.nverts(), "scaled_metrics");
+
+  Kokkos::parallel_for(mesh.nverts(), KOKKOS_LAMBDA(const Omega_h::LO vert) {
+    Omega_h::Real adj_tally_sum = 0.0;
+    Omega_h::Real adj_tally_std_dev = 0.0;
+    for (auto idx = vert2elem.a2ab[vert]; idx < vert2elem.a2ab[vert + 1]; ++idx) {
+      adj_tally_sum += tally_mean[vert2elem.ab2b[idx]];
+      adj_tally_std_dev += tally_std_dev[vert2elem.ab2b[idx]];
+    }
+    Omega_h::Real avg_tally = adj_tally_sum / (vert2elem.a2ab[vert + 1] - vert2elem.a2ab[vert]);
+    Omega_h::Real avg_tally_std_dev = adj_tally_std_dev / (vert2elem.a2ab[vert + 1] - vert2elem.a2ab[vert]);
+    Omega_h::Real factor = Kokkos::fmin(0.5, Kokkos::fmax(10, avg_tally*100));
+    scaled_metrics[vert] = metrics[vert] * factor;
+  });
+
+  mesh.add_tag(Omega_h::VERT, "metric", 1, Omega_h::Reals(scaled_metrics));
   auto opts = Omega_h::AdaptOpts(&mesh);
   opts.xfer_opts.user_xfer = std::make_shared<ParticleAdapt>(p_adapt);
   adapt(&mesh, opts);
@@ -230,7 +246,8 @@ void PumiTallyImpl::adaptMesh() {
   auto *ptcls = pumipic_ptcls.get();
   ParticleAdapt p_adapt(ptcls, mesh);
   populateParticleAdaptationFields(p_adapt, ptcls, mesh.dim());
-  adaptMeshToMetric(mesh, p_adapt);
+  const auto [tally_mean, tally_std_dev] = p_pumi_particle_at_elem_boundary_handler->ComputeMeanAndStdDev();
+  adaptMeshToMetric(mesh, p_adapt, tally_mean, tally_std_dev);
   std::unique_ptr<PPPS> adapted_particles = rebuildParticlesAfterAdaptation(mesh, p_adapt, ptcls);
   pumipic_ptcls = std::move(adapted_particles);
   Omega_h::vtk::write_vtu("box_after_adapt.vtu", &mesh);
