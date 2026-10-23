@@ -242,17 +242,20 @@ std::unique_ptr<PPPS> rebuildParticlesAfterAdaptation(
 } // namespace
 
 void PumiTallyImpl::adaptMesh() {
+
   auto &mesh = *p_picparts->mesh();
-  Omega_h::vtk::write_vtu("box_before_adapt.vtu", &mesh);
+  p_pumi_particle_at_elem_boundary_handler->FinalizeTallies(mesh, "before_adaptation");
   auto *ptcls = pumipic_ptcls.get();
   ParticleAdapt p_adapt(ptcls, mesh);
   populateParticleAdaptationFields(p_adapt, ptcls, mesh.dim());
   const auto [tally_mean, tally_std_dev] = p_pumi_particle_at_elem_boundary_handler->ComputeMeanAndStdDev();
   adaptMeshToMetric(mesh, p_adapt, tally_mean, tally_std_dev);
   std::unique_ptr<PPPS> adapted_particles = rebuildParticlesAfterAdaptation(mesh, p_adapt, ptcls);
-  delete pumipic_ptcls;
   pumipic_ptcls = std::move(adapted_particles);
   Omega_h::vtk::write_vtu("box_after_adapt.vtu", &mesh);
+  p_pumi_particle_at_elem_boundary_handler = std::make_unique<ParticleAtElemBoundary>(mesh.nelems(), pumipic_ptcls->capacity());
+  p_particle_tracer = std::make_unique<ParticleTracer<PPParticle, pumitally::ParticleAtElemBoundary>>(*p_picparts, pumipic_ptcls.get(), *p_pumi_particle_at_elem_boundary_handler, 1e-8);
+  printf("Adaptation Complete\n");
 }
 
 void PumiTallyImpl::DiscardBatchTally() const {
