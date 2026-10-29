@@ -254,7 +254,11 @@ void PumiTallyImpl::adaptMesh() {
   pumipic_ptcls = std::move(adapted_particles);
   Omega_h::vtk::write_vtu("box_after_adapt.vtu", &mesh);
   p_pumi_particle_at_elem_boundary_handler = std::make_unique<ParticleAtElemBoundary>(mesh.nelems(), pumipic_ptcls->capacity());
+  p_picparts.reset();
+  PartitionMesh();
   p_particle_tracer = std::make_unique<ParticleTracer<PPParticle, pumitally::ParticleAtElemBoundary>>(*p_picparts, pumipic_ptcls.get(), *p_pumi_particle_at_elem_boundary_handler, 1e-8);
+  MoveToInitialLocation();
+  p_pumi_particle_at_elem_boundary_handler->AccumulateBatchFlux(normalization_factor);
   printf("Adaptation Complete\n");
 }
 
