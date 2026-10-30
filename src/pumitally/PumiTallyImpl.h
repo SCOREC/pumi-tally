@@ -267,6 +267,13 @@ struct PumiTallyImpl {
 
   void WriteTallyResults();
 
+  /**
+   * Write the id and current (origin) position of every particle to a CSV
+   * file with the columns `id,x,y,z`
+   * @param filename CSV file name
+   */
+  void WriteParticlesToCSV(const std::string &filename) const;
+
   void adaptMesh();
 
   void CopyLocationsToBuffer(double *particle_positions) const;

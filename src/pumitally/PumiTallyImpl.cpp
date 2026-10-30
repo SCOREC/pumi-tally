@@ -15,6 +15,10 @@
 #include <pumipic_ptcl_ops.hpp>
 #include "pumipic_adaptation.hpp"
 
+#include <fstream>
+#include <iomanip>
+#include <limits>
+
 #include "PumiTallyImpl.h"
 
 namespace pumitally {
@@ -198,7 +202,7 @@ void adaptMeshToMetric(Omega_h::Mesh &mesh, ParticleAdapt &p_adapt,
     Omega_h::Real avg_std_dev = adj_std_dev / (vert2elem.a2ab[vert + 1] - vert2elem.a2ab[vert]);
     Omega_h::Real variance = 0;
     if (!Omega_h::are_close(avg_std_dev, 0)) variance = avg_std_dev / avg_tally;
-    variance = Kokkos::fmax(5, Kokkos::fmin(10, variance*10));
+    variance = Kokkos::fmax(1, Kokkos::fmin(10, variance*10));
     scaled_metrics[vert] = metrics[vert] * variance;
   });
 
@@ -244,9 +248,10 @@ std::unique_ptr<PPPS> rebuildParticlesAfterAdaptation(
 } // namespace
 
 void PumiTallyImpl::adaptMesh() {
-
+  printf("Adaptation Started\n");
   auto &mesh = *p_picparts->mesh();
   p_pumi_particle_at_elem_boundary_handler->FinalizeTallies(mesh, "before_adaptation");
+  WriteParticlesToCSV("before_adaptation.csv");
   auto *ptcls = pumipic_ptcls.get();
   ParticleAdapt p_adapt(ptcls, mesh);
   populateParticleAdaptationFields(p_adapt, ptcls, mesh.dim());
@@ -278,6 +283,50 @@ void PumiTallyImpl::WriteTallyResults() {
 #ifdef PUMI_MEASURE_TIME
   Kokkos::fence();
 #endif
+}
+
+void PumiTallyImpl::WriteParticlesToCSV(const std::string &filename) const {
+  const auto capacity = pumipic_ptcls->capacity();
+  const auto particle_positions = pumipic_ptcls->get<0>();
+  const auto particle_ids = pumipic_ptcls->get<2>();
+
+  // indexed by particle slot; empty slots keep id -1 and are skipped below
+  const Omega_h::Write<Omega_h::LO> ids_dev(capacity, -1, "csv_particle_ids");
+  const Omega_h::Write<Omega_h::Real> positions_dev(capacity * 3, 0.0,
+                                                    "csv_particle_positions");
+
+  auto copy_particle_data =
+      PS_LAMBDA(const int &e, const int &pid, const int &mask) {
+    if (mask > 0) {
+      ids_dev[pid] = particle_ids(pid);
+      positions_dev[pid * 3 + 0] = particle_positions(pid, 0);
+      positions_dev[pid * 3 + 1] = particle_positions(pid, 1);
+      positions_dev[pid * 3 + 2] = particle_positions(pid, 2);
+    }
+  };
+  pumipic::parallel_for(pumipic_ptcls.get(), copy_particle_data,
+                        "copy particle ids and positions for csv");
+
+  const Omega_h::HostWrite<Omega_h::LO> ids_host(ids_dev);
+  const Omega_h::HostWrite<Omega_h::Real> positions_host(positions_dev);
+
+  std::ofstream csv_file(filename);
+  if (!csv_file.is_open()) {
+    fprintf(stderr, "[ERROR] Cannot open %s to write particle data\n",
+            filename.c_str());
+    return;
+  }
+  csv_file << std::setprecision(std::numeric_limits<Omega_h::Real>::max_digits10);
+  csv_file << "id,x,y,z\n";
+  for (Omega_h::LO pid = 0; pid < capacity; ++pid) {
+    if (ids_host[pid] < 0) {
+      continue;
+    }
+    csv_file << ids_host[pid] << ',' << positions_host[pid * 3 + 0] << ','
+             << positions_host[pid * 3 + 1] << ','
+             << positions_host[pid * 3 + 2] << '\n';
+  }
+  printf("[INFO] Wrote particle ids and positions to %s\n", filename.c_str());
 }
 
 void PumiTallyImpl::CopyFlyingFlagToBuffer(int8_t *flying) const {
