@@ -202,7 +202,7 @@ void adaptMeshToMetric(Omega_h::Mesh &mesh, ParticleAdapt &p_adapt,
     Omega_h::Real avg_std_dev = adj_std_dev / (vert2elem.a2ab[vert + 1] - vert2elem.a2ab[vert]);
     Omega_h::Real variance = 0;
     if (!Omega_h::are_close(avg_std_dev, 0)) variance = avg_std_dev / avg_tally;
-    variance = Kokkos::fmax(1, Kokkos::fmin(10, variance*10));
+    variance = Kokkos::fmax(.01, Kokkos::fmin(2, variance));
     scaled_metrics[vert] = metrics[vert] * variance;
   });
 
