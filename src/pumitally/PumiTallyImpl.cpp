@@ -7,6 +7,7 @@
 #include <Omega_h_array_ops.hpp>
 #include <Omega_h_metric.hpp>
 #include <Omega_h_mesh.hpp>
+#include <Omega_h_recover.hpp>
 #include <Omega_h_shape.hpp>
 #include <ParticleTracer.tpp>
 #include <pumipic_adjacency.tpp>
@@ -190,6 +191,7 @@ void adaptMeshToMetric(Omega_h::Mesh &mesh, ParticleAdapt &p_adapt,
   auto vert2elem = mesh.ask_up(Omega_h::VERT, Omega_h::REGION);
   auto metrics = Omega_h::get_implied_isos(&mesh);
   Omega_h::Write<Omega_h::Real> scaled_metrics(mesh.nverts(), "scaled_metrics");
+  const auto vert_error = Omega_h::project_by_fit(&mesh, tally_mean);
 
   Kokkos::parallel_for(mesh.nverts(), KOKKOS_LAMBDA(const Omega_h::LO vert) {
     Omega_h::Real adj_tally_sum = 0.0;
@@ -202,6 +204,7 @@ void adaptMeshToMetric(Omega_h::Mesh &mesh, ParticleAdapt &p_adapt,
     Omega_h::Real avg_std_dev = adj_std_dev / (vert2elem.a2ab[vert + 1] - vert2elem.a2ab[vert]);
     Omega_h::Real variance = 0;
     if (!Omega_h::are_close(avg_std_dev, 0)) variance = avg_std_dev / avg_tally;
+    variance = Kokkos::fabs(variance + vert_error[vert]*50);
     variance = Kokkos::fmax(.01, Kokkos::fmin(2, variance));
     scaled_metrics[vert] = metrics[vert] * variance;
   });
