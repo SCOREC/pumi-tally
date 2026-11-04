@@ -185,12 +185,81 @@ void populateParticleAdaptationFields(ParticleAdapt &p_adapt, PPPS *ptcls,
   p_adapt.populateFields();
 }
 
+void rebuildParticlesFromVariance(Omega_h::Mesh &mesh, ParticleAdapt &p_adapt,
+                                  const Omega_h::Reals &vert_variance) {
+  auto *ptcls = p_adapt.ptcls;
+  const auto n_elements = mesh.nelems();
+  const auto elem2vert = mesh.ask_down(Omega_h::REGION, Omega_h::VERT).ab2b;
+  const auto coords = mesh.coords();
+
+  PPPS::kkLidView remove_from_element("remove_from_element", n_elements);
+  PPPS::kkLidView added_elements("added_elements", n_elements);
+  PPPS::kkLidView n_added("n_added", 1);
+  Omega_h::parallel_for(n_elements, OMEGA_H_LAMBDA(const Omega_h::LO elem) {
+    const auto verts = Omega_h::gather_verts<4>(elem2vert, elem);
+    Omega_h::Real elem_variance = 0.0;
+    for (int i = 0; i < 4; ++i) elem_variance += vert_variance[verts[i]];
+    elem_variance /= 4.0;
+    if (elem_variance > 0.995) added_elements(Kokkos::atomic_fetch_add(&n_added(0), 1)) = elem;
+    else if (elem_variance < 0.1) remove_from_element(elem) = 1;
+  });
+
+  PPPS::kkLidView new_elements("new_elements", ptcls->capacity());
+  PPPS::kkLidView max_id("max_id", 1);
+  const auto particle_ids = ptcls->get<2>();
+  auto remove_particles = PS_LAMBDA(const int &elem, const int &pid, const int &mask) {
+    if (mask <= 0) new_elements(pid) = -1;
+    else {
+      Kokkos::atomic_max(&max_id(0), particle_ids(pid));
+      new_elements(pid) = remove_from_element(elem) ? -1 : elem;
+    }
+  };
+  pumipic::parallel_for(ptcls, remove_particles, "mark particles removed by variance");
+
+  const auto n_new = pumipic::getLastValue(n_added);
+  const auto first_new_id = pumipic::getLastValue(max_id) + 1;
+  PPPS::kkLidView new_particle_elements("new_particle_elements", n_new);
+  auto new_particles = pumipic::createMemberViews<PPParticle>(n_new);
+  auto new_orig = pumipic::getMemberView<PPParticle, 0>(new_particles);
+  auto new_dest = pumipic::getMemberView<PPParticle, 1>(new_particles);
+  auto new_ids = pumipic::getMemberView<PPParticle, 2>(new_particles);
+  auto new_in_flight = pumipic::getMemberView<PPParticle, 3>(new_particles);
+  auto new_wgt = pumipic::getMemberView<PPParticle, 4>(new_particles);
+  auto new_parent = pumipic::getMemberView<PPParticle, ADAPT_PARENT>(new_particles);
+  auto new_child = pumipic::getMemberView<PPParticle, ADAPT_CHILD>(new_particles);
+  auto new_dim = pumipic::getMemberView<PPParticle, ADAPT_DIM>(new_particles);
+  const auto mesh_dim = mesh.dim();
+
+  Omega_h::parallel_for(n_new, OMEGA_H_LAMBDA(const Omega_h::LO i) {
+    const auto elem = added_elements(i);
+    const auto verts = Omega_h::gather_verts<4>(elem2vert, elem);
+    const auto centroid = Omega_h::average(Omega_h::gather_vectors<4, 3>(coords, verts));
+    new_particle_elements(i) = elem;
+    for (int dim = 0; dim < 3; ++dim) {
+      new_orig(i, dim) = centroid[dim];
+      new_dest(i, dim) = centroid[dim];
+    }
+    new_wgt(i) = 0.0;
+    new_ids(i) = first_new_id + i;
+    new_in_flight(i) = 0;
+    new_parent(i) = elem;
+    new_child(i) = -1;
+    new_dim(i) = mesh_dim;
+  });
+
+  ptcls->rebuild(new_elements, new_particle_elements, new_particles);
+  pumipic::destroyViews<PPParticle>(new_particles);
+  printf("[INFO] Variance rebuild added %d particles, now %d particles\n", n_new, ptcls->nPtcls());
+  p_adapt.update(mesh);
+}
+
 void adaptMeshToMetric(Omega_h::Mesh &mesh, ParticleAdapt &p_adapt,
                        const Omega_h::Reals &tally_mean,
                        const Omega_h::Reals &std_dev) {
   auto vert2elem = mesh.ask_up(Omega_h::VERT, Omega_h::REGION);
   auto metrics = Omega_h::get_implied_isos(&mesh);
   Omega_h::Write<Omega_h::Real> scaled_metrics(mesh.nverts(), "scaled_metrics");
+  Omega_h::Write<Omega_h::Real> vert_variance(mesh.nverts(), "vert_variance");
   const auto vert_error = Omega_h::project_by_fit(&mesh, tally_mean);
 
   Kokkos::parallel_for(mesh.nverts(), KOKKOS_LAMBDA(const Omega_h::LO vert) {
@@ -205,9 +274,11 @@ void adaptMeshToMetric(Omega_h::Mesh &mesh, ParticleAdapt &p_adapt,
     Omega_h::Real variance = 0;
     if (!Omega_h::are_close(avg_std_dev, 0)) variance = avg_std_dev / avg_tally;
     variance = Kokkos::fabs(variance + vert_error[vert]*50);
-    variance = Kokkos::fmax(.01, Kokkos::fmin(2, variance));
+    variance = Kokkos::fmax(.01, Kokkos::fmin(1.5, variance));
+    vert_variance[vert] = variance;
     scaled_metrics[vert] = metrics[vert] * variance;
   });
+  rebuildParticlesFromVariance(mesh, p_adapt, Omega_h::Reals(vert_variance));
 
   mesh.add_tag(Omega_h::VERT, "metric", 1, Omega_h::Reals(scaled_metrics));
   auto opts = Omega_h::AdaptOpts(&mesh);
