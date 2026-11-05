@@ -170,6 +170,38 @@ void PumiTallyImpl::AccumulateBatchTally(const double normalization_factor) {
 namespace {
 using ParticleAdapt = Omega_h::ParticleAdapt<3, PPPS, 0, ADAPT_PARENT, ADAPT_CHILD, ADAPT_DIM>;
 
+struct ElemFieldParticleAdapt : public ParticleAdapt {
+  explicit ElemFieldParticleAdapt(const ParticleAdapt &base) : ParticleAdapt(base) {}
+
+  static void initElemFields(Omega_h::Mesh &old_mesh, Omega_h::Mesh &new_mesh) {
+    const auto dim = old_mesh.dim();
+    for (Omega_h::Int i = 0; i < old_mesh.ntags(dim); ++i) {
+      const auto *tag = old_mesh.get_tag(dim, i);
+      if (tag->name() == "global" || new_mesh.has_tag(dim, tag->name())) continue;
+      Omega_h::apply_to_omega_h_types(tag->type(), [&](auto tt) {
+        using T = decltype(tt);
+        const auto sz = new_mesh.nents(dim) * tag->ncomps();
+        new_mesh.add_tag(dim, tag->name(), tag->ncomps(), Omega_h::Read<T>(Omega_h::Write<T>(sz, T(0))), true);
+      });
+    }
+  }
+  void refine(Omega_h::Mesh &om, Omega_h::Mesh &nm, Omega_h::LOs k2e, Omega_h::LOs k2mv, Omega_h::Int pd, Omega_h::LOs k2p,
+              Omega_h::LOs p2n, Omega_h::LOs s2o, Omega_h::LOs s2n) override {
+    ParticleAdapt::refine(om, nm, k2e, k2mv, pd, k2p, p2n, s2o, s2n);
+    if (pd == om.dim()) initElemFields(om, nm);
+  }
+  void coarsen(Omega_h::Mesh &om, Omega_h::Mesh &nm, Omega_h::LOs k2v, Omega_h::Adj k2d, Omega_h::Int pd, Omega_h::LOs p2n,
+               Omega_h::LOs s2o, Omega_h::LOs s2n) override {
+    ParticleAdapt::coarsen(om, nm, k2v, k2d, pd, p2n, s2o, s2n);
+    if (pd == om.dim()) initElemFields(om, nm);
+  }
+  void swap(Omega_h::Mesh &om, Omega_h::Mesh &nm, Omega_h::Int pd, Omega_h::LOs k2e, Omega_h::LOs k2p, Omega_h::LOs p2n,
+            Omega_h::LOs s2o, Omega_h::LOs s2n) override {
+    ParticleAdapt::swap(om, nm, pd, k2e, k2p, p2n, s2o, s2n);
+    if (pd == om.dim()) initElemFields(om, nm);
+  }
+};
+
 void populateParticleAdaptationFields(ParticleAdapt &p_adapt, PPPS *ptcls,
                                       const Omega_h::Int mesh_dim) {
   const auto particle_position = ptcls->get<0>();
@@ -200,7 +232,8 @@ void rebuildParticlesFromVariance(Omega_h::Mesh &mesh, ParticleAdapt &p_adapt,
     Omega_h::Real elem_variance = 0.0;
     for (int i = 0; i < 4; ++i) elem_variance += vert_variance[verts[i]];
     elem_variance /= 4.0;
-    if (elem_variance > 0.995) added_elements(Kokkos::atomic_fetch_add(&n_added(0), 1)) = elem;
+    if (elem_variance > 0.999 && elem % 10 == 0) 
+      added_elements(Kokkos::atomic_fetch_add(&n_added(0), 1)) = elem;
     else if (elem_variance < 0.1) remove_from_element(elem) = 1;
   });
 
@@ -273,16 +306,16 @@ void adaptMeshToMetric(Omega_h::Mesh &mesh, ParticleAdapt &p_adapt,
     Omega_h::Real avg_std_dev = adj_std_dev / (vert2elem.a2ab[vert + 1] - vert2elem.a2ab[vert]);
     Omega_h::Real variance = 0;
     if (!Omega_h::are_close(avg_std_dev, 0)) variance = avg_std_dev / avg_tally;
-    variance = Kokkos::fabs(variance + vert_error[vert]*50);
-    variance = Kokkos::fmax(.01, Kokkos::fmin(1.5, variance));
+    variance = Kokkos::fabs(variance + vert_error[vert]);
+    variance = Kokkos::fmax(.001, Kokkos::fmin(2, variance)); //Left is coarsen limit, Right is refine limit
     vert_variance[vert] = variance;
-    scaled_metrics[vert] = metrics[vert] * variance;
+    scaled_metrics[vert] = metrics[vert] * variance * 0.7;
   });
   rebuildParticlesFromVariance(mesh, p_adapt, Omega_h::Reals(vert_variance));
 
   mesh.add_tag(Omega_h::VERT, "metric", 1, Omega_h::Reals(scaled_metrics));
   auto opts = Omega_h::AdaptOpts(&mesh);
-  opts.xfer_opts.user_xfer = std::make_shared<ParticleAdapt>(p_adapt);
+  opts.xfer_opts.user_xfer = std::make_shared<ElemFieldParticleAdapt>(p_adapt);
   adapt(&mesh, opts);
   mesh.remove_tag(Omega_h::VERT, "metric");
   p_adapt.update(mesh);
