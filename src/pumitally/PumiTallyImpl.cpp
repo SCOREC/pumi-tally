@@ -217,8 +217,7 @@ void populateParticleAdaptationFields(ParticleAdapt &p_adapt, PPPS *ptcls,
   p_adapt.populateFields();
 }
 
-void rebuildParticlesFromVariance(Omega_h::Mesh &mesh, ParticleAdapt &p_adapt,
-                                  const Omega_h::Reals &vert_variance) {
+void rebuildParticlesFromVariance(Omega_h::Mesh &mesh, ParticleAdapt &p_adapt, const Omega_h::Reals &vert_variance) {
   auto *ptcls = p_adapt.ptcls;
   const auto n_elements = mesh.nelems();
   const auto elem2vert = mesh.ask_down(Omega_h::REGION, Omega_h::VERT).ab2b;
@@ -286,9 +285,7 @@ void rebuildParticlesFromVariance(Omega_h::Mesh &mesh, ParticleAdapt &p_adapt,
   p_adapt.update(mesh);
 }
 
-void adaptMeshToMetric(Omega_h::Mesh &mesh, ParticleAdapt &p_adapt,
-                       const Omega_h::Reals &tally_mean,
-                       const Omega_h::Reals &std_dev) {
+void adaptMeshToMetric(Omega_h::Mesh &mesh, ParticleAdapt &p_adapt, const Omega_h::Reals &tally_mean, const Omega_h::Reals &std_dev) {
   auto vert2elem = mesh.ask_up(Omega_h::VERT, Omega_h::REGION);
   auto metrics = Omega_h::get_implied_isos(&mesh);
   Omega_h::Write<Omega_h::Real> scaled_metrics(mesh.nverts(), "scaled_metrics");
@@ -309,7 +306,7 @@ void adaptMeshToMetric(Omega_h::Mesh &mesh, ParticleAdapt &p_adapt,
     variance = Kokkos::fabs(variance + vert_error[vert]);
     variance = Kokkos::fmax(.001, Kokkos::fmin(2, variance)); //Left is coarsen limit, Right is refine limit
     vert_variance[vert] = variance;
-    scaled_metrics[vert] = metrics[vert] * variance * 0.7;
+    scaled_metrics[vert] = metrics[vert] * variance;
   });
   rebuildParticlesFromVariance(mesh, p_adapt, Omega_h::Reals(vert_variance));
 
@@ -321,8 +318,7 @@ void adaptMeshToMetric(Omega_h::Mesh &mesh, ParticleAdapt &p_adapt,
   p_adapt.update(mesh);
 }
 
-std::unique_ptr<PPPS> rebuildParticlesAfterAdaptation(
-    Omega_h::Mesh &mesh, ParticleAdapt &p_adapt, PPPS *ptcls) {
+std::unique_ptr<PPPS> rebuildParticlesAfterAdaptation(Omega_h::Mesh &mesh, ParticleAdapt &p_adapt, PPPS *ptcls) {
   const auto n_elements = mesh.nelems();
   const auto n_particles = ptcls->nPtcls();
   PPPS::kkLidView particles_per_element("particles_per_element", n_elements);
@@ -374,6 +370,7 @@ void PumiTallyImpl::adaptMesh() {
   p_particle_tracer = std::make_unique<ParticleTracer<PPParticle, pumitally::ParticleAtElemBoundary>>(*p_picparts, pumipic_ptcls.get(), *p_pumi_particle_at_elem_boundary_handler, 1e-8);
   MoveToInitialLocation();
   p_pumi_particle_at_elem_boundary_handler->AccumulateBatchFlux(0);
+  WriteParticlesToCSV("after_adaptation.csv");
   printf("Mesh State Reset\n");
 }
 
@@ -464,9 +461,12 @@ void PumiTallyImpl::CopyWeightsToBuffer(double *weights) const {
   Kokkos::deep_copy(device_weights_view, host_weights_view);
 
   auto p_wgt = pumipic_ptcls->get<4>();
+  const Omega_h::LO num_particles_l = num_particles;
   auto copy_particle_weights =
       PS_LAMBDA(const int &e, const int &pid, const int &mask) {
-    p_wgt(pid) = weights_l[pid];
+    // the weight buffer only has num_particles entries, but the particle
+    // structure capacity is larger (more so after adaptation adds particles)
+    p_wgt(pid) = (pid < num_particles_l) ? weights_l[pid] : 0.0;
   };
   pumipic::parallel_for(pumipic_ptcls.get(), copy_particle_weights,
                         "copy particle weights");
@@ -793,6 +793,23 @@ void CommitParticlePositions(PPPS *ptcls) {
   ps::parallel_for(ptcls, update_particle_position);
 }
 
+void HoldParticlesWithoutOpenMCHistory(PPPS *ptcls, const Omega_h::LO num_openmc_particles) {
+  const auto particle_origin = ptcls->get<0>();
+  const auto particle_destination = ptcls->get<1>();
+  const auto in_flight = ptcls->get<3>();
+  const auto p_wgt = ptcls->get<4>();
+  auto hold = PS_LAMBDA(const int &, const int &pid, const int &mask) {
+    if (mask > 0 && pid >= num_openmc_particles) {
+      particle_destination(pid, 0) = particle_origin(pid, 0);
+      particle_destination(pid, 1) = particle_origin(pid, 1);
+      particle_destination(pid, 2) = particle_origin(pid, 2);
+      in_flight(pid) = 0;
+      p_wgt(pid) = 0.0;
+    }
+  };
+  pumipic::parallel_for(ptcls, hold, "hold particles for openmc");
+}
+
 void PumiTallyImpl::SearchAndRebuild(const bool initial,
                                      const bool migrate) const {
   // the very first search has to be an initial (non tallying) one; every later
@@ -813,6 +830,7 @@ void PumiTallyImpl::SearchAndRebuild(const bool initial,
     p_pumi_particle_at_elem_boundary_handler->UpdatePreviousXPoints(
         pumipic_ptcls.get());
   }
+  HoldParticlesWithoutOpenMCHistory(pumipic_ptcls.get(), num_particles);
 
   const bool found_all = p_particle_tracer->search(migrate);
   if (!found_all) {
