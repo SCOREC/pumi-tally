@@ -286,24 +286,22 @@ void rebuildParticlesFromVariance(Omega_h::Mesh &mesh, ParticleAdapt &p_adapt, c
 }
 
 void adaptMeshToMetric(Omega_h::Mesh &mesh, ParticleAdapt &p_adapt, const Omega_h::Reals &tally_mean, const Omega_h::Reals &std_dev) {
-  auto vert2elem = mesh.ask_up(Omega_h::VERT, Omega_h::REGION);
-  auto metrics = Omega_h::get_implied_isos(&mesh);
+  auto vert_tally_avg = Omega_h::project_by_average(&mesh, tally_mean);
+  auto vert_dev_avg = Omega_h::project_by_average(&mesh, std_dev);
+  auto vert_tally = Omega_h::project_by_fit(&mesh, tally_mean);
+  auto vert_hessians = Omega_h::recover_hessians(&mesh, vert_tally);
+  auto max_abs_tally = Omega_h::get_max(mesh.comm(), Omega_h::fabs_each(tally_mean));
+  auto hessian_metric = Omega_h::get_hessian_metrics(mesh.dim(), vert_hessians, 0.01 * max_abs_tally);
+  auto variance_error = Omega_h::apply_isotropy(mesh.nverts(), hessian_metric, OMEGA_H_ISO_LENGTH);
+
   Omega_h::Write<Omega_h::Real> scaled_metrics(mesh.nverts(), "scaled_metrics");
   Omega_h::Write<Omega_h::Real> vert_variance(mesh.nverts(), "vert_variance");
-  const auto vert_error = Omega_h::project_by_fit(&mesh, tally_mean);
+  auto metrics = Omega_h::get_implied_isos(&mesh);
 
   Kokkos::parallel_for(mesh.nverts(), KOKKOS_LAMBDA(const Omega_h::LO vert) {
-    Omega_h::Real adj_tally_sum = 0.0;
-    Omega_h::Real adj_std_dev = 0.0;
-    for (auto idx = vert2elem.a2ab[vert]; idx < vert2elem.a2ab[vert + 1]; ++idx) {
-      adj_tally_sum += tally_mean[vert2elem.ab2b[idx]];
-      adj_std_dev += std_dev[vert2elem.ab2b[idx]];
-    }
-    Omega_h::Real avg_tally = adj_tally_sum / (vert2elem.a2ab[vert + 1] - vert2elem.a2ab[vert]);
-    Omega_h::Real avg_std_dev = adj_std_dev / (vert2elem.a2ab[vert + 1] - vert2elem.a2ab[vert]);
     Omega_h::Real variance = 0;
-    if (!Omega_h::are_close(avg_std_dev, 0)) variance = avg_std_dev / avg_tally;
-    variance = Kokkos::fabs(variance + vert_error[vert]);
+    if (!Omega_h::are_close(vert_dev_avg[vert], 0)) variance = vert_dev_avg[vert] / vert_tally_avg[vert];
+    variance = Kokkos::fabs(variance + variance_error[vert]);
     variance = Kokkos::fmax(.001, Kokkos::fmin(2, variance)); //Left is coarsen limit, Right is refine limit
     vert_variance[vert] = variance;
     scaled_metrics[vert] = metrics[vert] * variance;
