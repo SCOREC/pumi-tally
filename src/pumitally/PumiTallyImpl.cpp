@@ -288,16 +288,25 @@ void rebuildParticlesFromVariance(Omega_h::Mesh &mesh, ParticleAdapt &p_adapt, c
 void adaptMeshToMetric(Omega_h::Mesh &mesh, ParticleAdapt &p_adapt, const Omega_h::Reals &tally_mean, const Omega_h::Reals &std_dev) {
   auto vert_tally_avg = Omega_h::project_by_average(&mesh, tally_mean);
   auto vert_dev_avg = Omega_h::project_by_average(&mesh, std_dev);
-  auto vert_tally = Omega_h::project_by_fit(&mesh, tally_mean);
-  auto vert_hessians = Omega_h::recover_hessians(&mesh, vert_tally);
+  auto vert_tally_fit = Omega_h::project_by_fit(&mesh, tally_mean);
+  auto vert_gradiants = Omega_h::recover_gradients(&mesh, vert_tally_fit);
   auto max_abs_tally = Omega_h::get_max(mesh.comm(), Omega_h::fabs_each(tally_mean));
-  auto hessian_metric = Omega_h::get_hessian_metrics(mesh.dim(), vert_hessians, 0.01 * max_abs_tally);
-  auto variance_error = Omega_h::apply_isotropy(mesh.nverts(), hessian_metric, OMEGA_H_ISO_LENGTH);
+  auto gradiant_metric = Omega_h::get_gradient_metrics(mesh.dim(), vert_gradiants, 0.01 * max_abs_tally);
+  auto variance_error = Omega_h::apply_isotropy(mesh.nverts(), gradiant_metric, OMEGA_H_ISO_LENGTH);
+
+  // mesh.add_tag(mesh.dim(), "tally_mean", 1, tally_mean);
+  // mesh.add_tag(Omega_h::VERT, "tally_fit", 1, vert_tally_fit);
+  // mesh.add_tag(Omega_h::VERT, "tally_average", 1, vert_tally_avg);
+  // mesh.add_tag(Omega_h::VERT, "tally_gradiants", mesh.dim(), vert_gradiants);
+  // mesh.add_tag(Omega_h::VERT, "tally_variance", 1, variance_error);
+  // Omega_h::vtk::write_vtu("gradient_debug.vtu", &mesh);
+  // for (auto name : {"tally_fit", "tally_grad", "tally_grad_mag", "grad_target_h"})
+  //   mesh.remove_tag(Omega_h::VERT, name);
+  // mesh.remove_tag(mesh.dim(), "tally_mean");
 
   Omega_h::Write<Omega_h::Real> scaled_metrics(mesh.nverts(), "scaled_metrics");
   Omega_h::Write<Omega_h::Real> vert_variance(mesh.nverts(), "vert_variance");
   auto metrics = Omega_h::get_implied_isos(&mesh);
-
   Kokkos::parallel_for(mesh.nverts(), KOKKOS_LAMBDA(const Omega_h::LO vert) {
     Omega_h::Real variance = 0;
     if (!Omega_h::are_close(vert_dev_avg[vert], 0)) variance = vert_dev_avg[vert] / vert_tally_avg[vert];
